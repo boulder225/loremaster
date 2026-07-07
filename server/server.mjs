@@ -1,40 +1,41 @@
-// loremaster PoC server — zero dependencies, Node 20+.
+// loremaster PoC server — zero npm dependencies, Node 20+.
 //
-// Serves the barebone browser client and proxies a streaming chat turn to the
-// Anthropic Messages API. The browser does STT (SpeechRecognition) and TTS
-// (speechSynthesis); this server is only the "brain": persona + Claude.
+// Serves the barebone browser client and runs one NPC chat turn through Claude
+// on Amazon Bedrock — the SAME auth path the dvs-mcp OpenClaw agent uses
+// (AWS credentials via the standard chain; no separate Anthropic key). The
+// browser does STT (SpeechRecognition) and TTS (speechSynthesis); this server
+// is only the "brain": persona + Claude.
 //
 // The cascade is STT (browser) -> Claude (here) -> TTS (browser). Claude has no
-// native voice API. We stream Claude's text back as SSE so the client can start
-// speaking the first sentence while the rest is still generating.
+// native voice API. This box's AWS CLI has no converse-stream, so we take the
+// full reply and emit it as clause-sized SSE deltas — the client still speaks
+// clause-by-clause; the NPC just pauses ~1s to think first.
 //
-// Run:  ANTHROPIC_API_KEY=sk-ant-... node server/server.mjs
-// Then: open http://localhost:8787
+// Auth / config (shared with dvs-mcp):
+//   LLM_MODEL   e.g. amazon-bedrock/global.anthropic.claude-sonnet-4-6
+//               (the part after the first "/" is the Bedrock model id)
+//   AWS_REGION  e.g. us-east-1        AWS_PROFILE  e.g. default
+//
+// Run:  node server/server.mjs        Then: open http://localhost:8787
 
 import { createServer } from "node:http";
 import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { dirname, join, normalize } from "node:path";
+import { execFile } from "node:child_process";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(HERE, "..");
 const CLIENT_DIR = join(ROOT, "client");
 const PORT = Number(process.env.PORT ?? 8787);
-
-// Keep-it-simple config. Haiku is the right default for a live NPC — latency
-// matters more than deep reasoning for a tavern-keeper's quip.
-const MODEL = process.env.LOREMASTER_MODEL ?? "claude-haiku-4-5";
 const MAX_TOKENS = 400;
 
-const API_KEY = process.env.ANTHROPIC_API_KEY;
-if (!API_KEY) {
-  console.error(
-    "ANTHROPIC_API_KEY is not set.\n" +
-      "Get a key from console.anthropic.com and run:\n" +
-      "  ANTHROPIC_API_KEY=sk-ant-... node server/server.mjs",
-  );
-  process.exit(1);
-}
+// Resolve the Bedrock model id from LLM_MODEL (same var dvs-mcp uses). LLM_MODEL
+// looks like "amazon-bedrock/<model-id>"; strip the provider prefix. Falls back
+// to the model dvs-mcp defaults to.
+const LLM_MODEL = process.env.LLM_MODEL ?? "amazon-bedrock/global.anthropic.claude-sonnet-4-6";
+const MODEL_ID = LLM_MODEL.includes("/") ? LLM_MODEL.slice(LLM_MODEL.indexOf("/") + 1) : LLM_MODEL;
+const REGION = process.env.AWS_REGION ?? process.env.AWS_DEFAULT_REGION ?? "us-east-1";
 
 const PERSONA = await readFile(join(HERE, "persona.md"), "utf8");
 
@@ -67,8 +68,50 @@ async function serveStatic(req, res) {
   }
 }
 
+// Call Bedrock Converse via the AWS CLI. Returns the assistant's text.
+// Uses the ambient AWS credential chain (profile / env / role) — nothing here
+// touches a secret directly.
+function bedrockConverse(history) {
+  const messages = history.map((m) => ({ role: m.role, content: [{ text: m.content }] }));
+  const args = [
+    "bedrock-runtime", "converse",
+    "--region", REGION,
+    "--model-id", MODEL_ID,
+    "--system", JSON.stringify([{ text: PERSONA }]),
+    "--messages", JSON.stringify(messages),
+    "--inference-config", JSON.stringify({ maxTokens: MAX_TOKENS }),
+    "--output", "json",
+  ];
+  return new Promise((resolve, reject) => {
+    execFile("aws", args, { maxBuffer: 4 * 1024 * 1024 }, (err, stdout, stderr) => {
+      if (err) {
+        reject(new Error((stderr || err.message || "aws call failed").trim()));
+        return;
+      }
+      try {
+        const data = JSON.parse(stdout);
+        const text = (data.output?.message?.content ?? [])
+          .map((b) => b.text ?? "")
+          .join("")
+          .trim();
+        resolve(text);
+      } catch (e) {
+        reject(new Error(`could not parse Bedrock response: ${e.message}`));
+      }
+    });
+  });
+}
+
+// Split a reply into clause-sized chunks so the client speaks incrementally.
+function toClauses(text) {
+  return text
+    .split(/(?<=[.!?,:;])\s+/)
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+
 // POST /chat  { history: [{role, content}, ...] }
-// Streams Server-Sent Events: {type:"delta", text} ... then {type:"done"}.
+// Streams SSE: {type:"delta", text} per clause, then {type:"done"}.
 async function handleChat(req, res) {
   let raw = "";
   for await (const chunk of req) raw += chunk;
@@ -76,40 +119,21 @@ async function handleChat(req, res) {
   let history;
   try {
     ({ history } = JSON.parse(raw));
-    if (!Array.isArray(history)) throw new Error("history must be an array");
+    if (!Array.isArray(history) || history.length === 0) {
+      throw new Error("history must be a non-empty array");
+    }
   } catch (err) {
     res.writeHead(400, { "content-type": "application/json" });
     res.end(JSON.stringify({ error: String(err.message ?? err) }));
     return;
   }
 
-  let upstream;
+  let text;
   try {
-    upstream = await fetch("https://api.anthropic.com/v1/messages", {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        "x-api-key": API_KEY,
-        "anthropic-version": "2023-06-01",
-      },
-      body: JSON.stringify({
-        model: MODEL,
-        max_tokens: MAX_TOKENS,
-        system: [{ type: "text", text: PERSONA, cache_control: { type: "ephemeral" } }],
-        messages: history,
-        stream: true,
-      }),
-    });
+    text = await bedrockConverse(history);
   } catch (err) {
     res.writeHead(502, { "content-type": "application/json" });
-    res.end(JSON.stringify({ error: `upstream fetch failed: ${err.message ?? err}` }));
-    return;
-  }
-
-  if (!upstream.ok || !upstream.body) {
-    const detail = await upstream.text().catch(() => "");
-    res.writeHead(502, { "content-type": "application/json" });
-    res.end(JSON.stringify({ error: `Anthropic API ${upstream.status}: ${detail}` }));
+    res.end(JSON.stringify({ error: `Bedrock error: ${err.message ?? err}` }));
     return;
   }
 
@@ -118,44 +142,9 @@ async function handleChat(req, res) {
     "cache-control": "no-cache",
     connection: "keep-alive",
   });
-
   const send = (obj) => res.write(`data: ${JSON.stringify(obj)}\n\n`);
-
-  // Parse the Anthropic SSE stream and forward only the text deltas the client
-  // needs. We split on blank lines (SSE event boundaries) and read the `data:`
-  // payloads.
-  const decoder = new TextDecoder();
-  let buffer = "";
-  try {
-    for await (const chunk of upstream.body) {
-      buffer += decoder.decode(chunk, { stream: true });
-      let sep;
-      while ((sep = buffer.indexOf("\n\n")) !== -1) {
-        const event = buffer.slice(0, sep);
-        buffer = buffer.slice(sep + 2);
-        for (const line of event.split("\n")) {
-          if (!line.startsWith("data:")) continue;
-          const payload = line.slice(5).trim();
-          if (!payload) continue;
-          let evt;
-          try {
-            evt = JSON.parse(payload);
-          } catch {
-            continue;
-          }
-          if (evt.type === "content_block_delta" && evt.delta?.type === "text_delta") {
-            send({ type: "delta", text: evt.delta.text });
-          } else if (evt.type === "message_stop") {
-            send({ type: "done" });
-          } else if (evt.type === "error") {
-            send({ type: "error", error: evt.error?.message ?? "stream error" });
-          }
-        }
-      }
-    }
-  } catch (err) {
-    send({ type: "error", error: `stream interrupted: ${err.message ?? err}` });
-  }
+  for (const clause of toClauses(text)) send({ type: "delta", text: clause + " " });
+  send({ type: "done" });
   res.end();
 }
 
@@ -171,5 +160,6 @@ const server = createServer((req, res) => {
 });
 
 server.listen(PORT, () => {
-  console.log(`loremaster PoC on http://localhost:${PORT}  (model: ${MODEL})`);
+  console.log(`loremaster PoC on http://localhost:${PORT}`);
+  console.log(`  model:  ${MODEL_ID}  (region ${REGION}, via AWS credential chain)`);
 });

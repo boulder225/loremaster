@@ -45,8 +45,10 @@ starts speaking the first sentence while Claude is still generating the rest.
 **Working barebone PoC** — hold a button, speak to an NPC, hear it answer in
 character. See [`server/README.md`](server/README.md) to run it. The first cut
 uses the browser's Web Speech API for STT+TTS (zero dependencies, no GPU) and a
-tiny Node server that streams a turn from Claude. The AudioWorklet-based
-server-side cascade in `client/worklets/` is the later robustness upgrade.
+tiny Node server that runs a turn through Claude on **Amazon Bedrock**, using
+the same AWS credentials as the dvs-mcp agent (no separate Anthropic key). The
+AudioWorklet-based server-side cascade in `client/worklets/` is the later
+robustness upgrade.
 
 ## Roadmap
 

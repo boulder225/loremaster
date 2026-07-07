@@ -6,11 +6,15 @@ speak to an NPC, hear it answer in character.**
 ## What it is
 
 - **STT + TTS in the browser** via the Web Speech API (`SpeechRecognition` +
-  `speechSynthesis`) — no GPU, no extra services, no API keys beyond Claude.
-- **Claude as the NPC brain** — the server (`server.mjs`, zero npm dependencies,
-  Node 20+ built-in `fetch`) streams a turn from the Anthropic Messages API.
-- **Streaming into speech** — Claude's text is spoken clause-by-clause as it
-  arrives, so the NPC starts talking before the full reply is generated.
+  `speechSynthesis`) — no GPU, no extra services.
+- **Claude on Amazon Bedrock as the NPC brain** — the server (`server.mjs`, zero
+  npm dependencies, Node 20+) runs one turn via the AWS CLI's
+  `bedrock-runtime converse`. This is the **same auth path the dvs-mcp OpenClaw
+  agent uses**: your ambient AWS credentials (profile / env / role), no separate
+  Anthropic API key.
+- **Streaming into speech** — the reply is emitted as clause-sized chunks so the
+  NPC speaks clause-by-clause. (This box's AWS CLI has no `converse-stream`, so
+  generation completes first — the NPC pauses ~1s to think, then speaks.)
 
 This is the STT → Claude → TTS **cascade** (Claude has no native voice API),
 proven end-to-end with the simplest possible parts. The AudioWorklet-based
@@ -20,18 +24,23 @@ upgrade, not needed for this PoC.
 ## Run
 
 ```bash
-# From the repo root. Needs a first-party Anthropic API key.
-ANTHROPIC_API_KEY=sk-ant-... node server/server.mjs
+# From the repo root. Uses your existing AWS credentials — same as dvs-mcp.
+node server/server.mjs
 ```
 
 Then open <http://localhost:8787> in **Chrome or Edge** (Firefox/Safari have
 weak or no `SpeechRecognition` support). Hold the button, speak, release.
 
-Optional env vars:
+Requires the AWS CLI with credentials that can call Bedrock (verify with
+`aws bedrock-runtime converse --help` and a `aws sts get-caller-identity`).
 
+Env vars (shared with dvs-mcp):
+
+- `LLM_MODEL` — default `amazon-bedrock/global.anthropic.claude-sonnet-4-6`.
+  The part after the first `/` is the Bedrock model id.
+- `AWS_REGION` — the region to call Bedrock in (e.g. `us-east-1`).
+- `AWS_PROFILE` — which AWS profile to use, if not the default.
 - `PORT` — default `8787`.
-- `LOREMASTER_MODEL` — default `claude-haiku-4-5` (fastest tier; latency matters
-  more than depth for a live NPC quip). Try `claude-sonnet-5` for richer replies.
 
 ## The NPC
 
