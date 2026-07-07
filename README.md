@@ -28,40 +28,39 @@ STT and TTS stages are separate services we wire around it. The key latency
 trick is to **stream Claude's text into TTS clause-by-clause** so the NPC
 starts speaking the first sentence while Claude is still generating the rest.
 
-- **`client/`** — browser-side audio capture/playback (AudioWorklets). The
-  reusable pieces are vendored from `smolagents/hf-realtime-voice` (see
-  Credits); see [`client/AUDIO-WIRING.md`](client/AUDIO-WIRING.md) for how they
-  fit together. **There is no working WebSocket client yet** — the source
-  Space's client spoke the OpenAI Realtime protocol (which Claude doesn't
-  support) and was removed. We write our own against the loremaster server.
-- **`server/`** — WebSocket backend: STT -> Claude (with NPC/DM persona +
-  game-state tools) -> TTS. Not yet implemented.
-- Audio routing into/out of the call happens at the OS level (e.g. PipeWire
-  virtual sinks), since questportal is a plain browser call with no
-  bot/integration API.
+- **`client/`** — `index.html` (push-to-talk UI) plus the `mic-capture`
+  AudioWorklet vendored from `smolagents/hf-realtime-voice` (see Credits) that
+  streams 16 kHz PCM to the server. See
+  [`client/AUDIO-WIRING.md`](client/AUDIO-WIRING.md) for the worklet wiring.
+- **`server/`** — `server.mjs`: serves the client, bridges the mic WebSocket to
+  Amazon Transcribe (`/stt`), runs the NPC turn on Bedrock (`/chat`), and
+  synthesizes the voice with Polly (`/tts`). `persona.md` is the NPC prompt.
+- **`routing/`** — PipeWire scripts to bridge the NPC voice into a questportal
+  call at the OS level (questportal is a plain browser call with no bot API).
 
 ## Status
 
 **Working barebone PoC** — hold a button, speak to an NPC, hear it answer in
-character. See [`server/README.md`](server/README.md) to run it, and
-[`routing/`](routing/) to bridge his voice into the call. STT is browser
-push-to-talk (`SpeechRecognition`); the NPC brain is Claude on **Amazon
-Bedrock** and the voice is **Amazon Polly** (neural, cross-browser) — both on
-the same AWS credentials as the dvs-mcp agent, no separate Anthropic key. A tiny
-zero-dependency Node server ties it together. The AudioWorklet cascade in
-`client/worklets/` is the remaining STT-quality upgrade.
+character, in **any** modern browser. See [`server/README.md`](server/README.md)
+to run it, and [`routing/`](routing/) to bridge his voice into the call. The
+whole cascade runs on the **same AWS credentials as the dvs-mcp agent** (no
+Anthropic key): **Amazon Transcribe** streaming for STT (browser mic → the
+vendored `mic-capture` worklet → WebSocket → live text), **Claude on Amazon
+Bedrock** for the brain, and **Amazon Polly** neural for the voice. A small Node
+server (one npm dep for the STT SDK) ties it together.
 
 ## Roadmap
 
-- [x] Barebone PoC: browser Web Speech STT/TTS -> Claude -> spoken NPC reply, streaming clause-by-clause
+- [x] Barebone PoC: speak -> Claude -> spoken NPC reply, streaming clause-by-clause
 - [x] NPC persona definition (`server/persona.md`, system prompt in the spirit of a SOUL.md)
 - [x] Push-to-talk gating for a live multi-player call (PoC tab is hold-to-talk)
 - [x] PipeWire virtual-sink routing to bridge Bram into a questportal call (`routing/`)
-- [x] Better TTS: Amazon Polly neural voice (cross-browser MP3), same AWS auth as the brain
-- [ ] Better STT: real speech-to-text (Whisper/Parakeet) behind the worklet pipeline (browser STT is Chromium-only)
+- [x] TTS: Amazon Polly neural voice (cross-browser MP3), same AWS auth as the brain
+- [x] STT: Amazon Transcribe streaming via the mic-capture worklet — cross-browser, no local model
 - [ ] Game-state tools the agent can call (e.g. lore lookup, quest/NPC state)
 - [ ] Cross-session memory and world state
+- [ ] Tune STT/UX: reactive orb visualizer, endpointing, latency
 
 ## Credits
 
-`client/worklets/` and `client/ws/codec.js` are adapted from [smolagents/hf-realtime-voice](https://huggingface.co/spaces/smolagents/hf-realtime-voice), which credits its backend to [huggingface/speech-to-speech](https://github.com/huggingface/speech-to-speech). The Space's `s2s-ws-client.js` was vendored initially but removed — it was hard-wired to the OpenAI Realtime protocol, which doesn't apply to a Claude backend. That Space's README does not declare a license; these files are reused here for a personal, non-commercial PoC pending clarification of reuse terms if this project is ever published more broadly.
+`client/worklets/` and `client/ws/codec.js` are adapted from [smolagents/hf-realtime-voice](https://huggingface.co/spaces/smolagents/hf-realtime-voice), which credits its backend to [huggingface/speech-to-speech](https://github.com/huggingface/speech-to-speech). Of these, `worklets/mic-capture.js` is the one actually wired in (it streams 16 kHz PCM to Amazon Transcribe); `audio-playback.js` and `ws/codec.js` are kept as reference (playback uses Polly MP3 in an `<audio>` element instead). The Space's `s2s-ws-client.js` was vendored initially but removed — it was hard-wired to the OpenAI Realtime protocol, which doesn't apply to a Claude/AWS backend. That Space's README does not declare a license; these files are reused here for a personal, non-commercial PoC pending clarification of reuse terms if this project is ever published more broadly.

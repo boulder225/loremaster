@@ -1,0 +1,14 @@
+{
+  "name": "loremaster",
+  "version": "0.1.0",
+  "description": "Voice-driven AI NPC / DM assistant for tabletop RPGs — STT (AWS Transcribe streaming) -> Claude (Bedrock) -> TTS (Polly).",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "start": "node server/server.mjs"
+  },
+  "license": "UNLICENSED",
+  "dependencies": {
+    "@aws-sdk/client-transcribe-streaming": "^3.1080.0"
+  }
+}

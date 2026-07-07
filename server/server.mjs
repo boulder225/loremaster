@@ -1,20 +1,22 @@
-// loremaster PoC server — zero npm dependencies, Node 20+.
+// loremaster PoC server. The full voice cascade runs on ONE set of AWS
+// credentials (the same chain the dvs-mcp OpenClaw agent uses — no Anthropic key):
 //
-// Serves the barebone browser client and runs one NPC chat turn through Claude
-// on Amazon Bedrock — the SAME auth path the dvs-mcp OpenClaw agent uses
-// (AWS credentials via the standard chain; no separate Anthropic key). The
-// browser does STT (SpeechRecognition) and TTS (speechSynthesis); this server
-// is only the "brain": persona + Claude.
+//   STT  = Amazon Transcribe streaming  (browser mic -> WebSocket -> live text)
+//   brain = Claude on Amazon Bedrock    (converse)
+//   TTS  = Amazon Polly neural          (text -> mp3 -> browser plays)
 //
-// The cascade is STT (browser) -> Claude (here) -> TTS (browser). Claude has no
-// native voice API. This box's AWS CLI has no converse-stream, so we take the
-// full reply and emit it as clause-sized SSE deltas — the client still speaks
-// clause-by-clause; the NPC just pauses ~1s to think first.
+// The browser captures mic audio with an AudioWorklet (works in every browser,
+// unlike SpeechRecognition) and streams 16 kHz PCM16 frames over a WebSocket to
+// /stt. We forward those to Transcribe, send partial/final transcripts back, and
+// on a final transcript the client runs a normal /chat + /tts turn.
 //
-// Auth / config (shared with dvs-mcp):
+// Config (shared with dvs-mcp):
 //   LLM_MODEL   e.g. amazon-bedrock/global.anthropic.claude-sonnet-4-6
-//               (the part after the first "/" is the Bedrock model id)
 //   AWS_REGION  e.g. us-east-1        AWS_PROFILE  e.g. default
+//   TTS_VOICE   Polly voice id (default Arthur); "" disables Polly
+//
+// One npm dependency (@aws-sdk/client-transcribe-streaming) for STT; everything
+// else is Node built-ins + the AWS CLI.
 //
 // Run:  node server/server.mjs        Then: open http://localhost:8787
 
@@ -24,6 +26,11 @@ import { fileURLToPath } from "node:url";
 import { dirname, join, normalize } from "node:path";
 import { tmpdir } from "node:os";
 import { execFile } from "node:child_process";
+import {
+  TranscribeStreamingClient,
+  StartStreamTranscriptionCommand,
+} from "@aws-sdk/client-transcribe-streaming";
+import { handleUpgrade } from "./ws.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(HERE, "..");
@@ -43,6 +50,11 @@ const TTS_VOICE = process.env.TTS_VOICE ?? "Arthur";
 const LLM_MODEL = process.env.LLM_MODEL ?? "amazon-bedrock/global.anthropic.claude-sonnet-4-6";
 const MODEL_ID = LLM_MODEL.includes("/") ? LLM_MODEL.slice(LLM_MODEL.indexOf("/") + 1) : LLM_MODEL;
 const REGION = process.env.AWS_REGION ?? process.env.AWS_DEFAULT_REGION ?? "us-east-1";
+
+// Transcribe streaming expects a fixed sample rate; the mic-capture worklet
+// downsamples to 16 kHz PCM16 mono, which matches this.
+const STT_SAMPLE_RATE = 16000;
+const stt = new TranscribeStreamingClient({ region: REGION });
 
 const PERSONA = await readFile(join(HERE, "persona.md"), "utf8");
 
@@ -205,6 +217,72 @@ async function handleChat(req, res) {
   res.end();
 }
 
+// Bridge one browser WebSocket to a Transcribe streaming session. The browser
+// sends binary PCM16 frames (from the mic-capture worklet) and a text "stop"
+// control frame on release; we push audio into Transcribe and relay
+// {type:"partial"|"final", text} back.
+function bridgeSttSocket(conn) {
+  // A queue of incoming audio chunks exposed as the async iterable Transcribe wants.
+  const chunks = [];
+  let waiting = null;   // resolver for a pending next() when the queue is empty
+  let ended = false;
+
+  const pushChunk = (buf) => {
+    if (waiting) { waiting({ value: buf, done: false }); waiting = null; }
+    else chunks.push(buf);
+  };
+  const endStream = () => {
+    ended = true;
+    if (waiting) { waiting({ value: undefined, done: true }); waiting = null; }
+  };
+
+  const audioStream = (async function* () {
+    for (;;) {
+      if (chunks.length) {
+        yield { AudioEvent: { AudioChunk: chunks.shift() } };
+      } else if (ended) {
+        return;
+      } else {
+        const next = await new Promise((r) => (waiting = r));
+        if (next.done) return;
+        yield { AudioEvent: { AudioChunk: next.value } };
+      }
+    }
+  })();
+
+  conn.on("message", (msg) => {
+    if (msg.type === "binary") pushChunk(msg.data);
+    else if (msg.type === "text" && msg.data === "stop") endStream();
+  });
+  conn.on("close", endStream);
+
+  (async () => {
+    try {
+      const resp = await stt.send(
+        new StartStreamTranscriptionCommand({
+          LanguageCode: "en-US",
+          MediaEncoding: "pcm",
+          MediaSampleRateHertz: STT_SAMPLE_RATE,
+          AudioStream: audioStream,
+        }),
+      );
+      for await (const event of resp.TranscriptResultStream) {
+        const results = event.TranscriptEvent?.Transcript?.Results ?? [];
+        for (const r of results) {
+          const text = r.Alternatives?.[0]?.Transcript ?? "";
+          if (!text) continue;
+          conn.sendJSON({ type: r.IsPartial ? "partial" : "final", text });
+        }
+      }
+      conn.sendJSON({ type: "done" });
+    } catch (err) {
+      conn.sendJSON({ type: "error", error: String(err.message ?? err) });
+    } finally {
+      conn.close();
+    }
+  })();
+}
+
 const server = createServer((req, res) => {
   const fail = (err) => {
     if (!res.headersSent) res.writeHead(500, { "content-type": "application/json" });
@@ -227,8 +305,19 @@ const server = createServer((req, res) => {
   serveStatic(req, res);
 });
 
+// Browser opens ws://<host>/stt and streams mic PCM for live transcription.
+server.on("upgrade", (req, socket) => {
+  if (new URL(req.url, "http://x").pathname === "/stt") {
+    handleUpgrade(req, socket, bridgeSttSocket);
+  } else {
+    socket.destroy();
+  }
+});
+
 server.listen(PORT, () => {
   console.log(`loremaster PoC on http://localhost:${PORT}`);
-  console.log(`  model:  ${MODEL_ID}  (region ${REGION}, via AWS credential chain)`);
+  console.log(`  brain:  ${MODEL_ID}  (Bedrock, region ${REGION})`);
   console.log(`  voice:  ${TTS_VOICE ? `${TTS_VOICE} (Amazon Polly neural)` : "browser speechSynthesis (Polly disabled)"}`);
+  console.log(`  ears:   Amazon Transcribe streaming (region ${REGION})`);
+  console.log(`  all via the AWS credential chain — no Anthropic key.`);
 });
