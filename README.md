@@ -54,8 +54,8 @@ robustness upgrade.
 
 - [x] Barebone PoC: browser Web Speech STT/TTS -> Claude -> spoken NPC reply, streaming clause-by-clause
 - [x] NPC persona definition (`server/persona.md`, system prompt in the spirit of a SOUL.md)
-- [ ] Push-to-talk gating for a live multi-player call (partly done: PoC is already push-to-talk in one tab)
-- [ ] PipeWire virtual-sink routing docs/scripts to bridge into a questportal call
+- [x] Push-to-talk gating for a live multi-player call (PoC tab is hold-to-talk)
+- [x] PipeWire virtual-sink routing to bridge Bram into a questportal call (`routing/`)
 - [ ] Robustness upgrade: real STT (Whisper/Parakeet) + TTS behind the worklet pipeline
 - [ ] Game-state tools the agent can call (e.g. lore lookup, quest/NPC state)
 - [ ] Cross-session memory and world state
