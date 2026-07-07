@@ -28,10 +28,11 @@ STT and TTS stages are separate services we wire around it. The key latency
 trick is to **stream Claude's text into TTS clause-by-clause** so the NPC
 starts speaking the first sentence while Claude is still generating the rest.
 
-- **`client/`** — `index.html` (push-to-talk UI) plus the `mic-capture`
-  AudioWorklet vendored from `smolagents/hf-realtime-voice` (see Credits) that
-  streams 16 kHz PCM to the server. See
-  [`client/AUDIO-WIRING.md`](client/AUDIO-WIRING.md) for the worklet wiring.
+- **`client/`** — `index.html` (push-to-talk orb UI), `orb.js` (a reactive
+  visualizer that pulses to the live mic while you speak and to Bram's voice
+  while he speaks), and the `mic-capture` AudioWorklet vendored from
+  `smolagents/hf-realtime-voice` (see Credits) that streams 16 kHz PCM to the
+  server. See [`client/AUDIO-WIRING.md`](client/AUDIO-WIRING.md) for the wiring.
 - **`server/`** — `server.mjs`: serves the client, bridges the mic WebSocket to
   Amazon Transcribe (`/stt`), runs the NPC turn on Bedrock (`/chat`), and
   synthesizes the voice with Polly (`/tts`). `persona.md` is the NPC prompt.
@@ -57,10 +58,11 @@ server (one npm dep for the STT SDK) ties it together.
 - [x] PipeWire virtual-sink routing to bridge Bram into a questportal call (`routing/`)
 - [x] TTS: Amazon Polly neural voice (cross-browser MP3), same AWS auth as the brain
 - [x] STT: Amazon Transcribe streaming via the mic-capture worklet — cross-browser, no local model
+- [x] Reactive orb visualizer (`client/orb.js`) — pulses to mic + Bram's voice, like the fork
 - [ ] Game-state tools the agent can call (e.g. lore lookup, quest/NPC state)
 - [ ] Cross-session memory and world state
-- [ ] Tune STT/UX: reactive orb visualizer, endpointing, latency
+- [ ] Further UX: endpointing (auto-stop on silence), latency tuning
 
 ## Credits
 
-`client/worklets/` and `client/ws/codec.js` are adapted from [smolagents/hf-realtime-voice](https://huggingface.co/spaces/smolagents/hf-realtime-voice), which credits its backend to [huggingface/speech-to-speech](https://github.com/huggingface/speech-to-speech). Of these, `worklets/mic-capture.js` is the one actually wired in (it streams 16 kHz PCM to Amazon Transcribe); `audio-playback.js` and `ws/codec.js` are kept as reference (playback uses Polly MP3 in an `<audio>` element instead). The Space's `s2s-ws-client.js` was vendored initially but removed — it was hard-wired to the OpenAI Realtime protocol, which doesn't apply to a Claude/AWS backend. That Space's README does not declare a license; these files are reused here for a personal, non-commercial PoC pending clarification of reuse terms if this project is ever published more broadly.
+`client/worklets/` and `client/ws/codec.js` are adapted from [smolagents/hf-realtime-voice](https://huggingface.co/spaces/smolagents/hf-realtime-voice), which credits its backend to [huggingface/speech-to-speech](https://github.com/huggingface/speech-to-speech). Of these, `worklets/mic-capture.js` is the one actually wired in (it streams 16 kHz PCM to Amazon Transcribe); `audio-playback.js` and `ws/codec.js` are kept as reference (playback uses Polly MP3 in an `<audio>` element instead). The Space's `s2s-ws-client.js` was vendored initially but removed — it was hard-wired to the OpenAI Realtime protocol, which doesn't apply to a Claude/AWS backend. `client/orb.js` is our own module but follows that Space's `orb-visualizer.js` approach (CSS-variable-driven 5-band meter + glow, same low-biased frequency bands and attack/release smoothing). That Space's README does not declare a license; these files are reused here for a personal, non-commercial PoC pending clarification of reuse terms if this project is ever published more broadly.

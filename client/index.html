@@ -14,16 +14,51 @@
   }
   h1 { font-size: 1.5rem; margin: 0; color: #d9a441; font-weight: normal; }
   .sub { margin: 0; opacity: 0.6; font-size: 0.85rem; }
-  #talk {
-    width: 180px; height: 180px; border-radius: 50%; border: 2px solid #d9a441;
-    background: radial-gradient(circle at 50% 35%, #3a2f1e, #1c170f);
-    color: #e8e2d4; font: inherit; font-size: 1.1rem; cursor: pointer;
-    transition: transform 0.1s, box-shadow 0.2s;
+
+  /* --- Reactive orb. Driven by CSS vars the Orb writes on <html>:
+     --level (0..1 overall energy) and --bar0..--bar4 (5 frequency bands).
+     The accent hue shifts by state class on the orb. --- */
+  :root { --level: 0; --bar0:0; --bar1:0; --bar2:0; --bar3:0; --bar4:0; }
+  #orb {
+    position: relative; width: 220px; height: 220px;
+    display: grid; place-items: center;
   }
-  #talk:active { transform: scale(0.97); }
-  #talk.listening { box-shadow: 0 0 0 8px rgba(217,164,65,0.15); border-color: #f0c76a; }
-  #talk.thinking { opacity: 0.6; cursor: wait; }
-  #talk.speaking { box-shadow: 0 0 0 8px rgba(120,180,120,0.18); border-color: #8fbf8f; }
+  #talk {
+    width: 180px; height: 180px; border-radius: 50%;
+    border: 2px solid var(--accent, #d9a441);
+    background:
+      radial-gradient(circle at 50% 35%,
+        color-mix(in srgb, var(--accent, #d9a441) calc(var(--level) * 45%), #3a2f1e),
+        #1c170f);
+    color: #e8e2d4; font: inherit; font-size: 1.05rem; cursor: pointer;
+    /* pulse + glow scale with live audio level */
+    transform: scale(calc(1 + var(--level) * 0.12));
+    box-shadow: 0 0 calc(12px + var(--level) * 60px)
+                calc(var(--level) * 10px)
+                color-mix(in srgb, var(--accent, #d9a441) 60%, transparent);
+    transition: border-color 0.2s, background 0.1s;
+  }
+  #talk:active { filter: brightness(1.1); }
+  #talk:disabled { cursor: not-allowed; opacity: 0.5; }
+  #talk.listening { --accent: #f0c76a; }
+  #talk.thinking  { --accent: #b9863a; cursor: wait; }
+  #talk.speaking  { --accent: #8fbf8f; }
+  /* Five bars fanned across the orb, heights from --bar0..--bar4 */
+  #bars {
+    position: absolute; inset: 0; display: flex; align-items: center;
+    justify-content: center; gap: 7px; pointer-events: none;
+  }
+  #bars > i {
+    width: 8px; border-radius: 4px; background: var(--accent, #d9a441);
+    opacity: 0.85;
+    height: calc(14px + var(--h) * 120px);
+    transition: height 0.05s linear;
+  }
+  #bars > i:nth-child(1) { --h: var(--bar0); }
+  #bars > i:nth-child(2) { --h: var(--bar1); }
+  #bars > i:nth-child(3) { --h: var(--bar2); }
+  #bars > i:nth-child(4) { --h: var(--bar3); }
+  #bars > i:nth-child(5) { --h: var(--bar4); }
   #status { min-height: 1.4rem; opacity: 0.7; font-size: 0.9rem; }
   #log {
     width: min(640px, 100%); display: flex; flex-direction: column; gap: 0.6rem;
@@ -37,17 +72,27 @@
 </head>
 <body>
   <h1>The Salted Lantern</h1>
-  <p class="sub">Hold the button, speak to Bram, release. Works in any modern browser.</p>
-  <button id="talk">Hold&nbsp;to&nbsp;talk</button>
+  <p class="sub">Hold the orb, speak to Bram, release. Works in any modern browser.</p>
+  <div id="orb">
+    <div id="bars"><i></i><i></i><i></i><i></i><i></i></div>
+    <button id="talk">Hold&nbsp;to&nbsp;talk</button>
+  </div>
   <div id="status"></div>
   <div id="log"></div>
   <p id="unsupported" hidden></p>
 
 <script type="module">
+import { Orb, ORB_FFT_SIZE } from "./orb.js";
+
 const talk = document.getElementById("talk");
 const statusEl = document.getElementById("status");
 const logEl = document.getElementById("log");
 const unsupported = document.getElementById("unsupported");
+
+// The reactive orb — fed the mic analyser while you speak, Bram's output
+// analyser while he speaks. It idles (falls to rest) when pointed at null.
+const orb = new Orb();
+orb.start();
 
 // STT is server-side (Amazon Transcribe): we capture mic audio with an
 // AudioWorklet and stream 16 kHz PCM16 frames over a WebSocket. That works in
@@ -71,16 +116,27 @@ fetch("/config").then((r) => r.json()).then((c) => { serverTts = !!c.serverTts; 
 // --- Speech playback: a small queue so clauses play in order, with barge-in ---
 // `speechGen` is bumped on every barge-in; in-flight fetches/playbacks check it
 // and abort, so a new turn (or the player talking over Bram) cuts old audio.
+// Polly clauses play through a WebAudio graph so the orb reacts to Bram's voice.
 let speechGen = 0;
 let audioChain = Promise.resolve();
 let currentAudio = null;
+let playCtx = null, outAnalyser = null;
+
+function ensurePlayGraph() {
+  if (playCtx) return;
+  playCtx = new AudioContext();
+  outAnalyser = playCtx.createAnalyser();
+  outAnalyser.fftSize = ORB_FFT_SIZE;
+  outAnalyser.connect(playCtx.destination); // analyser -> speakers
+}
 
 function stopSpeaking() {
   speechGen++;
   window.speechSynthesis.cancel();
-  if (currentAudio) { currentAudio.pause(); currentAudio = null; }
+  if (currentAudio) { try { currentAudio.pause(); } catch {} currentAudio = null; }
   audioChain = Promise.resolve();
   talk.classList.remove("speaking");
+  if (!listening) orb.setSource(null); // don't clobber the mic if we're listening
 }
 
 // Speak one clause. Uses Polly (mp3 over /tts) when available, else the browser.
@@ -108,10 +164,26 @@ function speak(text) {
     const url = URL.createObjectURL(await resp.blob());
     await new Promise((resolve) => {
       if (gen !== speechGen) { URL.revokeObjectURL(url); return resolve(); }
+      ensurePlayGraph();
+      if (playCtx.state === "suspended") playCtx.resume().catch(() => {});
       const audio = new Audio(url);
+      audio.crossOrigin = "anonymous";
       currentAudio = audio;
+      // Route this clause through the analyser so the orb reacts to it.
+      let node = null;
+      try {
+        node = playCtx.createMediaElementSource(audio);
+        node.connect(outAnalyser);
+        orb.setSource(outAnalyser);
+      } catch { /* if routing fails, audio still plays via the element */ }
       talk.classList.add("speaking");
-      const done = () => { URL.revokeObjectURL(url); if (currentAudio === audio) currentAudio = null; if (!currentAudio) talk.classList.remove("speaking"); resolve(); };
+      const done = () => {
+        URL.revokeObjectURL(url);
+        try { node?.disconnect(); } catch {}
+        if (currentAudio === audio) currentAudio = null;
+        if (!currentAudio) { talk.classList.remove("speaking"); if (!listening) orb.setSource(null); }
+        resolve();
+      };
       audio.onended = done;
       audio.onerror = done;
       audio.play().catch(done);
@@ -133,7 +205,7 @@ function addTurn(who, text) {
 // --- Push-to-talk: mic -> worklet -> WebSocket -> Amazon Transcribe ---
 // Reuses the vendored mic-capture worklet (16 kHz PCM16 frames). The final
 // transcript from Transcribe drives a normal sendTurn().
-let audioCtx = null, micStream = null, captureNode = null, micSrc = null;
+let audioCtx = null, micStream = null, captureNode = null, micSrc = null, micAnalyser = null;
 let ws = null, finalText = "", listening = false;
 
 talk.addEventListener("pointerdown", startListening);
@@ -175,6 +247,12 @@ async function startListening() {
     };
     micSrc = audioCtx.createMediaStreamSource(micStream);
     micSrc.connect(captureNode);
+
+    // Tap the mic for the orb (parallel to the worklet — doesn't affect capture).
+    micAnalyser = audioCtx.createAnalyser();
+    micAnalyser.fftSize = ORB_FFT_SIZE;
+    micSrc.connect(micAnalyser);
+    orb.setSource(micAnalyser);
   } catch (err) {
     setStatus(`mic error: ${err.message ?? err}`);
     teardownMic();
@@ -187,9 +265,11 @@ async function startListening() {
 function teardownMic() {
   try { captureNode?.disconnect(); } catch {}
   try { micSrc?.disconnect(); } catch {}
+  try { micAnalyser?.disconnect(); } catch {}
   try { micStream?.getTracks().forEach((t) => t.stop()); } catch {}
   try { audioCtx?.close(); } catch {}
-  captureNode = micSrc = micStream = audioCtx = null;
+  captureNode = micSrc = micStream = micAnalyser = audioCtx = null;
+  orb.setSource(null); // idle until Bram's playback points it at the output
 }
 
 function stopListening() {
