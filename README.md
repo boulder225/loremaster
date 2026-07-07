@@ -43,12 +43,13 @@ starts speaking the first sentence while Claude is still generating the rest.
 ## Status
 
 **Working barebone PoC** — hold a button, speak to an NPC, hear it answer in
-character. See [`server/README.md`](server/README.md) to run it. The first cut
-uses the browser's Web Speech API for STT+TTS (zero dependencies, no GPU) and a
-tiny Node server that runs a turn through Claude on **Amazon Bedrock**, using
-the same AWS credentials as the dvs-mcp agent (no separate Anthropic key). The
-AudioWorklet-based server-side cascade in `client/worklets/` is the later
-robustness upgrade.
+character. See [`server/README.md`](server/README.md) to run it, and
+[`routing/`](routing/) to bridge his voice into the call. STT is browser
+push-to-talk (`SpeechRecognition`); the NPC brain is Claude on **Amazon
+Bedrock** and the voice is **Amazon Polly** (neural, cross-browser) — both on
+the same AWS credentials as the dvs-mcp agent, no separate Anthropic key. A tiny
+zero-dependency Node server ties it together. The AudioWorklet cascade in
+`client/worklets/` is the remaining STT-quality upgrade.
 
 ## Roadmap
 
@@ -56,7 +57,8 @@ robustness upgrade.
 - [x] NPC persona definition (`server/persona.md`, system prompt in the spirit of a SOUL.md)
 - [x] Push-to-talk gating for a live multi-player call (PoC tab is hold-to-talk)
 - [x] PipeWire virtual-sink routing to bridge Bram into a questportal call (`routing/`)
-- [ ] Robustness upgrade: real STT (Whisper/Parakeet) + TTS behind the worklet pipeline
+- [x] Better TTS: Amazon Polly neural voice (cross-browser MP3), same AWS auth as the brain
+- [ ] Better STT: real speech-to-text (Whisper/Parakeet) behind the worklet pipeline (browser STT is Chromium-only)
 - [ ] Game-state tools the agent can call (e.g. lore lookup, quest/NPC state)
 - [ ] Cross-session memory and world state
 

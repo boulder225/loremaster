@@ -19,9 +19,10 @@
 // Run:  node server/server.mjs        Then: open http://localhost:8787
 
 import { createServer } from "node:http";
-import { readFile } from "node:fs/promises";
+import { readFile, mkdtemp, readFile as readFileBin, rm } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { dirname, join, normalize } from "node:path";
+import { tmpdir } from "node:os";
 import { execFile } from "node:child_process";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -29,6 +30,12 @@ const ROOT = join(HERE, "..");
 const CLIENT_DIR = join(ROOT, "client");
 const PORT = Number(process.env.PORT ?? 8787);
 const MAX_TOKENS = 400;
+
+// Amazon Polly neural voice for the NPC. Same AWS credential chain as Bedrock.
+// Arthur = en-GB male neural, a good fit for a gruff harbor-tavern keeper.
+// Set TTS_VOICE="" to disable server TTS and let the client fall back to the
+// browser's speechSynthesis.
+const TTS_VOICE = process.env.TTS_VOICE ?? "Arthur";
 
 // Resolve the Bedrock model id from LLM_MODEL (same var dvs-mcp uses). LLM_MODEL
 // looks like "amazon-bedrock/<model-id>"; strip the provider prefix. Falls back
@@ -102,6 +109,56 @@ function bedrockConverse(history) {
   });
 }
 
+// Synthesize speech with Amazon Polly (neural). Returns an mp3 Buffer.
+// Polly's CLI writes to a file path argument, so we round-trip through a temp dir.
+async function pollySynthesize(text) {
+  const dir = await mkdtemp(join(tmpdir(), "loremaster-tts-"));
+  const out = join(dir, "speech.mp3");
+  const args = [
+    "polly", "synthesize-speech",
+    "--region", REGION,
+    "--engine", "neural",
+    "--voice-id", TTS_VOICE,
+    "--output-format", "mp3",
+    "--text", text,
+    out,
+  ];
+  try {
+    await new Promise((resolve, reject) => {
+      execFile("aws", args, (err, _stdout, stderr) => {
+        if (err) reject(new Error((stderr || err.message || "polly failed").trim()));
+        else resolve();
+      });
+    });
+    return await readFileBin(out);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+}
+
+// POST /tts  { text }  ->  audio/mpeg
+async function handleTts(req, res) {
+  let raw = "";
+  for await (const chunk of req) raw += chunk;
+  let text;
+  try {
+    ({ text } = JSON.parse(raw));
+    if (typeof text !== "string" || !text.trim()) throw new Error("text required");
+  } catch (err) {
+    res.writeHead(400, { "content-type": "application/json" });
+    res.end(JSON.stringify({ error: String(err.message ?? err) }));
+    return;
+  }
+  try {
+    const mp3 = await pollySynthesize(text.trim());
+    res.writeHead(200, { "content-type": "audio/mpeg", "cache-control": "no-store" });
+    res.end(mp3);
+  } catch (err) {
+    res.writeHead(502, { "content-type": "application/json" });
+    res.end(JSON.stringify({ error: `Polly error: ${err.message ?? err}` }));
+  }
+}
+
 // Split a reply into clause-sized chunks so the client speaks incrementally.
 function toClauses(text) {
   return text
@@ -149,11 +206,22 @@ async function handleChat(req, res) {
 }
 
 const server = createServer((req, res) => {
+  const fail = (err) => {
+    if (!res.headersSent) res.writeHead(500, { "content-type": "application/json" });
+    res.end(JSON.stringify({ error: String(err.message ?? err) }));
+  };
   if (req.method === "POST" && req.url === "/chat") {
-    handleChat(req, res).catch((err) => {
-      if (!res.headersSent) res.writeHead(500, { "content-type": "application/json" });
-      res.end(JSON.stringify({ error: String(err.message ?? err) }));
-    });
+    handleChat(req, res).catch(fail);
+    return;
+  }
+  if (req.method === "POST" && req.url === "/tts") {
+    handleTts(req, res).catch(fail);
+    return;
+  }
+  if (req.method === "GET" && req.url === "/config") {
+    // Tell the client whether server-side Polly TTS is available.
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify({ serverTts: Boolean(TTS_VOICE), voice: TTS_VOICE || null }));
     return;
   }
   serveStatic(req, res);
@@ -162,4 +230,5 @@ const server = createServer((req, res) => {
 server.listen(PORT, () => {
   console.log(`loremaster PoC on http://localhost:${PORT}`);
   console.log(`  model:  ${MODEL_ID}  (region ${REGION}, via AWS credential chain)`);
+  console.log(`  voice:  ${TTS_VOICE ? `${TTS_VOICE} (Amazon Polly neural)` : "browser speechSynthesis (Polly disabled)"}`);
 });

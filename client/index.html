@@ -60,6 +60,61 @@ if (!SR || !window.speechSynthesis) {
 // Conversation history sent to the server each turn (the API is stateless).
 const history = [];
 
+// Server-side Polly TTS if available; else browser speechSynthesis.
+let serverTts = false;
+fetch("/config").then((r) => r.json()).then((c) => { serverTts = !!c.serverTts; }).catch(() => {});
+
+// --- Speech playback: a small queue so clauses play in order, with barge-in ---
+// `speechGen` is bumped on every barge-in; in-flight fetches/playbacks check it
+// and abort, so a new turn (or the player talking over Bram) cuts old audio.
+let speechGen = 0;
+let audioChain = Promise.resolve();
+let currentAudio = null;
+
+function stopSpeaking() {
+  speechGen++;
+  window.speechSynthesis.cancel();
+  if (currentAudio) { currentAudio.pause(); currentAudio = null; }
+  audioChain = Promise.resolve();
+  talk.classList.remove("speaking");
+}
+
+// Speak one clause. Uses Polly (mp3 over /tts) when available, else the browser.
+function speak(text) {
+  const clean = text.trim();
+  if (!clean) return;
+  const gen = speechGen;
+  if (!serverTts) {
+    const u = new SpeechSynthesisUtterance(clean);
+    u.rate = 1.0; u.pitch = 0.9;
+    u.onstart = () => { if (gen === speechGen) talk.classList.add("speaking"); };
+    u.onend = () => { if (!window.speechSynthesis.speaking) talk.classList.remove("speaking"); };
+    if (gen === speechGen) window.speechSynthesis.speak(u);
+    return;
+  }
+  // Chain Polly clauses so they play strictly in order.
+  audioChain = audioChain.then(async () => {
+    if (gen !== speechGen) return; // barged in — skip
+    const resp = await fetch("/tts", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ text: clean }),
+    });
+    if (!resp.ok || gen !== speechGen) return;
+    const url = URL.createObjectURL(await resp.blob());
+    await new Promise((resolve) => {
+      if (gen !== speechGen) { URL.revokeObjectURL(url); return resolve(); }
+      const audio = new Audio(url);
+      currentAudio = audio;
+      talk.classList.add("speaking");
+      const done = () => { URL.revokeObjectURL(url); if (currentAudio === audio) currentAudio = null; if (!currentAudio) talk.classList.remove("speaking"); resolve(); };
+      audio.onended = done;
+      audio.onerror = done;
+      audio.play().catch(done);
+    });
+  }).catch(() => {});
+}
+
 const setStatus = (t) => { statusEl.textContent = t; };
 function addTurn(who, text) {
   const div = document.createElement("div");
@@ -81,7 +136,7 @@ talk.addEventListener("pointerleave", stopListening);
 
 function startListening() {
   if (!SR || talk.classList.contains("thinking")) return;
-  window.speechSynthesis.cancel(); // barge-in: cut off Bram if he's talking
+  stopSpeaking(); // barge-in: cut off Bram (browser TTS or Polly) if he's talking
   finalTranscript = "";
   recognition = new SR();
   recognition.lang = "en-US";
@@ -127,16 +182,8 @@ async function sendTurn(userText) {
   let full = "";
   let pending = ""; // buffer until we have a full clause to speak
 
-  const speak = (text) => {
-    const clean = text.trim();
-    if (!clean) return;
-    const u = new SpeechSynthesisUtterance(clean);
-    u.rate = 1.0; u.pitch = 0.9;
-    u.onstart = () => talk.classList.add("speaking");
-    u.onend = () => { if (!window.speechSynthesis.speaking) talk.classList.remove("speaking"); };
-    window.speechSynthesis.speak(u);
-  };
-  // Flush whole sentences/clauses out of `pending` as they complete.
+  // Flush whole sentences/clauses out of `pending` as they complete, into the
+  // shared speak() (Polly or browser TTS, chosen by /config).
   const flushClauses = (finalFlush = false) => {
     const parts = pending.split(/(?<=[.!?,:;])\s+/);
     const keepLast = finalFlush ? 0 : 1;
