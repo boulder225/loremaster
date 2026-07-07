@@ -38,11 +38,21 @@ const CLIENT_DIR = join(ROOT, "client");
 const PORT = Number(process.env.PORT ?? 8787);
 const MAX_TOKENS = 400;
 
+// Language switch. LANG=en (default) or it. Selects the Transcribe language,
+// the Polly neural voice, and which persona file to load. Override any single
+// piece with STT_LANG / TTS_VOICE / PERSONA_FILE if you want a different mix.
+const LANGS = {
+  en: { stt: "en-US", voice: "Arthur",  persona: "persona.md" },     // gruff en-GB tavern keeper
+  it: { stt: "it-IT", voice: "Adriano", persona: "persona.it.md" },  // Italian male neural
+};
+const LANG = (process.env.LANG_MODE ?? "en").toLowerCase();
+const LCFG = LANGS[LANG] ?? LANGS.en;
+
 // Amazon Polly neural voice for the NPC. Same AWS credential chain as Bedrock.
-// Arthur = en-GB male neural, a good fit for a gruff harbor-tavern keeper.
-// Set TTS_VOICE="" to disable server TTS and let the client fall back to the
-// browser's speechSynthesis.
-const TTS_VOICE = process.env.TTS_VOICE ?? "Arthur";
+// Set TTS_VOICE="" to disable server TTS and fall back to browser speechSynthesis.
+const TTS_VOICE = process.env.TTS_VOICE ?? LCFG.voice;
+const STT_LANG = process.env.STT_LANG ?? LCFG.stt;
+const PERSONA_FILE = process.env.PERSONA_FILE ?? LCFG.persona;
 
 // Resolve the Bedrock model id from LLM_MODEL (same var dvs-mcp uses). LLM_MODEL
 // looks like "amazon-bedrock/<model-id>"; strip the provider prefix. Falls back
@@ -56,7 +66,7 @@ const REGION = process.env.AWS_REGION ?? process.env.AWS_DEFAULT_REGION ?? "us-e
 const STT_SAMPLE_RATE = 16000;
 const stt = new TranscribeStreamingClient({ region: REGION });
 
-const PERSONA = await readFile(join(HERE, "persona.md"), "utf8");
+const PERSONA = await readFile(join(HERE, PERSONA_FILE), "utf8");
 
 const CONTENT_TYPES = {
   ".html": "text/html; charset=utf-8",
@@ -260,7 +270,7 @@ function bridgeSttSocket(conn) {
     try {
       const resp = await stt.send(
         new StartStreamTranscriptionCommand({
-          LanguageCode: "en-US",
+          LanguageCode: STT_LANG,
           MediaEncoding: "pcm",
           MediaSampleRateHertz: STT_SAMPLE_RATE,
           AudioStream: audioStream,
@@ -318,6 +328,7 @@ server.listen(PORT, () => {
   console.log(`loremaster PoC on http://localhost:${PORT}`);
   console.log(`  brain:  ${MODEL_ID}  (Bedrock, region ${REGION})`);
   console.log(`  voice:  ${TTS_VOICE ? `${TTS_VOICE} (Amazon Polly neural)` : "browser speechSynthesis (Polly disabled)"}`);
-  console.log(`  ears:   Amazon Transcribe streaming (region ${REGION})`);
+  console.log(`  ears:   Amazon Transcribe streaming — ${STT_LANG}  (region ${REGION})`);
+  console.log(`  lang:   ${LANG}  (persona ${PERSONA_FILE})`);
   console.log(`  all via the AWS credential chain — no Anthropic key.`);
 });
