@@ -42,19 +42,21 @@ starts speaking the first sentence while Claude is still generating the rest.
 
 ## Status
 
-Early scaffolding. `client/` contains only the backend-agnostic audio-handling
-pieces (mic capture, playback, PCM/base64 codec) vendored from an existing
-open-source Space; the WebSocket client, server, and persona/tooling layer are
-not yet built.
+**Working barebone PoC** — hold a button, speak to an NPC, hear it answer in
+character. See [`server/README.md`](server/README.md) to run it. The first cut
+uses the browser's Web Speech API for STT+TTS (zero dependencies, no GPU) and a
+tiny Node server that streams a turn from Claude. The AudioWorklet-based
+server-side cascade in `client/worklets/` is the later robustness upgrade.
 
 ## Roadmap
 
-- [ ] WebSocket client against the loremaster server (replacing the removed OpenAI-Realtime one)
-- [ ] Minimal WebSocket server: STT -> Claude -> TTS round trip (stream Claude tokens into TTS)
-- [ ] NPC/DM persona definition (system prompt, in the spirit of a SOUL.md)
+- [x] Barebone PoC: browser Web Speech STT/TTS -> Claude -> spoken NPC reply, streaming clause-by-clause
+- [x] NPC persona definition (`server/persona.md`, system prompt in the spirit of a SOUL.md)
+- [ ] Push-to-talk gating for a live multi-player call (partly done: PoC is already push-to-talk in one tab)
+- [ ] PipeWire virtual-sink routing docs/scripts to bridge into a questportal call
+- [ ] Robustness upgrade: real STT (Whisper/Parakeet) + TTS behind the worklet pipeline
 - [ ] Game-state tools the agent can call (e.g. lore lookup, quest/NPC state)
-- [ ] Push-to-talk gating to avoid always-listening in a live multi-player call
-- [ ] PipeWire virtual-sink routing docs/scripts for questportal
+- [ ] Cross-session memory and world state
 
 ## Credits
 
